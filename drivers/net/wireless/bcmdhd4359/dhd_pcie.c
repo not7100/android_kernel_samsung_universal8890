@@ -24,7 +24,7 @@
  *
  * <<Broadcom-WL-IPTag/Open:>>
  *
- * $Id: dhd_pcie.c 743012 2018-01-24 11:46:34Z $
+ * $Id: dhd_pcie.c 762598 2018-05-15 08:00:06Z $
  */
 
 
@@ -574,17 +574,17 @@ dhdpcie_bus_isr(dhd_bus_t *bus)
 		DHD_TRACE(("%s: Enter\n", __FUNCTION__));
 		/* verify argument */
 		if (!bus) {
-			DHD_ERROR(("%s : bus is null pointer, exit \n", __FUNCTION__));
+			DHD_ERROR_MEM(("%s : bus is null pointer, exit \n", __FUNCTION__));
 			break;
 		}
 
 		if (bus->dhd->dongle_reset) {
-			DHD_ERROR(("%s : dongle is reset\n", __FUNCTION__));
+			DHD_ERROR_MEM(("%s : dongle is reset\n", __FUNCTION__));
 			break;
 		}
 
 		if (bus->dhd->busstate == DHD_BUS_DOWN) {
-			DHD_ERROR(("%s : bus is down \n", __FUNCTION__));
+			DHD_ERROR_MEM(("%s : bus is down \n", __FUNCTION__));
 			break;
 		}
 
@@ -606,7 +606,7 @@ dhdpcie_bus_isr(dhd_bus_t *bus)
 
 		/* Check if the interrupt is ours or not */
 		if (intstatus == 0) {
-			DHD_TRACE(("%s : this interrupt is not ours\n", __FUNCTION__));
+			DHD_ERROR_MEM(("%s : this interrupt is not ours\n", __FUNCTION__));
 			break;
 		}
 
@@ -636,7 +636,13 @@ dhdpcie_bus_isr(dhd_bus_t *bus)
 		bus->ipend = TRUE;
 
 		bus->isr_intr_disable_count++;
-		dhdpcie_bus_intr_disable(bus); /* Disable interrupt using IntMask!! */
+
+		/* For Linux, Macos etc (otherthan NDIS) instead of disabling
+		 * dongle interrupt by clearing the IntMask, disable directly
+		 * interrupt from the host side, so that host will not recieve
+		 * any interrupts at all, even though dongle raises interrupts
+		 */
+		dhdpcie_disable_irq_nosync(bus); /* Disable interrupt!! */
 
 		bus->intdis = TRUE;
 
@@ -6644,7 +6650,10 @@ dhd_bus_dpc(struct dhd_bus *bus)
 	if (!resched) {
 		bus->intstatus = 0;
 		bus->dpc_intr_enable_count++;
-		dhdpcie_bus_intr_enable(bus); /* Enable back interrupt using Intmask!! */
+		/* For Linux, Macos etc (otherthan NDIS) enable back the host interrupts
+		 * which has been disabled in the dhdpcie_bus_isr()
+		 */
+		dhdpcie_enable_irq(bus); /* Enable back interrupt!! */
 	}
 
 	DHD_GENERAL_LOCK(bus->dhd, flags);
@@ -7025,17 +7034,18 @@ dhdpci_bus_read_frames(dhd_bus_t *bus)
 				DHD_OS_WAKE_UNLOCK(bus->dhd);
 			}
 #endif /* DHD_FW_COREDUMP */
-			bus->dhd->hang_reason = HANG_REASON_PCIE_LINK_DOWN;
-			dhd_os_send_hang_message(bus->dhd);
 		} else {
 			DHD_ERROR(("%s: Link is Down.\n", __FUNCTION__));
 #ifdef CONFIG_ARCH_MSM
 			bus->no_cfg_restore = 1;
 #endif /* CONFIG_ARCH_MSM */
 			bus->is_linkdown = 1;
-			bus->dhd->hang_reason = HANG_REASON_PCIE_LINK_DOWN;
-			dhd_os_send_hang_message(bus->dhd);
 		}
+
+		dhd_prot_debug_info_print(bus->dhd);
+		bus->dhd->hang_reason = HANG_REASON_PCIE_LINK_DOWN;
+		dhd_os_send_hang_message(bus->dhd);
+		more = FALSE;
 	}
 #endif /* SUPPORT_LINKDOWN_RECOVERY */
 	return more;
@@ -8762,6 +8772,11 @@ dhdpcie_d11_check_outofreset(dhd_pub_t *dhd)
 	for (i = 0; i < MAX_NUM_D11CORES; i++) {
 		/* Check if bit 0 of resetctrl is cleared */
 		addr = dhd->sssr_reg_info.mac_regs[i].wrapper_regs.resetctrl;
+		if (!addr) {
+			/* ignore invalid address */
+			dhd->sssr_d11_outofreset[i] = FALSE;
+			continue;
+		}
 		dhd_sbreg_op(dhd, addr, &val, TRUE);
 		if (!(val & 1)) {
 			dhd->sssr_d11_outofreset[i] = TRUE;
